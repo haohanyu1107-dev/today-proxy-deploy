@@ -1,84 +1,149 @@
+# today-proxy
 
----
+Today.app（today.ai）AI 反向代理 —— 把 Today 手机 App 的私有协议翻译成
+**OpenAI / Anthropic 兼容 API**，多账号池轮换，纯 Python 标准库，零依赖。
 
-## 3. 今天实际发生了什么（时间线 + 踩坑）
+```
+客户端 ──HTTP──> today-proxy :8770 ──Today 私有协议──> today.ai
+                (OpenAI/Anthropic 格式)    (session token + 账号池)
+```
 
-### 时间线（10-26，全部在这台手机上）
+## 特性
 
-| 时刻 | 动作 | 结果 |
+- **双协议**：`/v1/chat/completions`（OpenAI）+ `/v1/messages`（Anthropic），
+  主流客户端（OpenCode、Cherry Studio、LobeChat…）开箱即用
+- **SSE 流式**：两端点都支持 `stream: true`
+- **账号池**：多账号轮询、按权重分配、额度 ≥98% 自动冷却、并发闸控
+- **零依赖**：Python ≥3.8 标准库，无需 pip install
+- **Web 控制台**：`/ui` 页面可视化收码登录、看号池状态
+- **轻量**：单进程单文件核心，systemd / Docker 一键部署
+
+## 快速开始
+
+### 方式一：systemd（推荐，Linux 服务器）
+
+```bash
+git clone https://github.com/haohanyu1107-dev/today-proxy-deploy.git
+cd today-proxy-deploy
+sudo bash install.sh
+```
+
+脚本自动完成：装 python3 → 拷贝代码到 `/opt/today-proxy` → 生成 `/etc/today-proxy.env`
+（含随机 API Key）→ 注册 systemd 服务 → 健康检查。
+
+**登录账号（必须做，否则没有模型可用）：**
+
+```bash
+cd /opt/today-proxy
+python3 login.py +861NNNNNNNNN           # 发送短信验证码
+python3 login.py +861NNNNNNNNN 123456    # 提交验证码，session token 写入 data/session.txt
+systemctl restart today-proxy            # 重启加载
+```
+
+多账号重复执行即可，号池自动聚合；或在浏览器打开 `http://<IP>:8770/ui` 网页收码登录。
+
+### 方式二：Docker
+
+```bash
+git clone https://github.com/haohanyu1107-dev/today-proxy-deploy.git
+cd today-proxy-deploy
+mkdir -p data
+
+# 写入 session token（可多个，逗号分隔；或登录后留在 data/session.txt）
+echo "你的TODAY_SESSION_TOKEN" > data/session.txt
+
+docker compose up -d
+```
+
+### 方式三：裸跑（临时测试）
+
+```bash
+AUTH_TOKENS=sk-mykey python3 server.py
+# 或
+TODAY_SESSION=tok1,tok2 AUTH_TOKENS=sk-mykey LISTEN_PORT=8770 python3 server.py
+```
+
+## 验证
+
+```bash
+curl http://127.0.0.1:8770/health
+# {"ok": true, "accounts": 2, "healthy": 2, ...}
+
+curl http://127.0.0.1:8770/v1/models
+# {"object":"list","data":[{"id":"deepseek-v4.1-flash",...},{"id":"glm-5.3",...}]}
+
+curl http://127.0.0.1:8770/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <你的AUTH_TOKENS>' \
+  -d '{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}'
+```
+
+或跑仓库自带四连验证：`bash scripts/verify.sh 8770`
+
+## 配置
+
+所有配置走环境变量（systemd 装：`/etc/today-proxy.env`；Docker：compose 里的 environment）：
+
+| 变量 | 默认 | 说明 |
 |---|---|---|
-| 00:00-00:55 | 初版 server.py + core.py + pool.py 落地，首次启动 | 起来了，但模型列表为空 |
-| 07:35-07:42 | 改 server.py × 3 次（协议兼容、流式、鉴权） | OpenAI + Anthropic 双协议通 |
-| 08:16-08:22 | 调并发、重启、测思考注入 | 前台服务稳定 |
-| 08:27-08:36 | 你给了 `Main8986/today-proxy-android`（APK 版），装上 | APK 版是另一条线，端口 8770 |
-| 08:39-10:03 | 排查：云端执行环境没手机 shell，任务反复中断 | **换成本地 shell_execute 直接跑**，立通 |
-| 10:05-10:13 | 加号：发现 4 个账号实际只对应 2 个手机号（重复登录 3 次） | 按 userId 去重，保留 2 个 |
-| 10:32-10:37 | 193 账号升级 pro；清 config.json 脏数据 | 双 pro 到手 |
-| 10:41-10:46 | `/v1/models` 返回 4 条（短名+长名重复）；Minis provider 配置 | 短名接入，清 4 条旧缓存 |
+| `LISTEN_HOST` | `0.0.0.0` | 监听地址 |
+| `LISTEN_PORT` | `8770` | 监听端口 |
+| `AUTH_TOKENS` | 空 | 客户端 API Key，多个逗号分隔；**空 = 不鉴权（仅限内网）** |
+| `TODAY_SESSION` | 空 | Today session token，多个逗号分隔；更推荐 `login.py` 写 `data/session.txt` |
+| `POOL_WEIGHTS` | 全 1 | 号池权重，与 TODAY_SESSION 一一对应，如 `1,2,1` |
+| `POOL_LABELS` | 空 | 控制台显示名，逗号分隔 |
+| `LANE_CONCURRENCY` | `1` | 单账号单模型并发上限 |
+| `MAX_USAGE_PERCENT` | `98` | 额度用到此百分比即停止派单（自动冷却） |
+| `QUEUE_WAIT` | `120` | 无号可用时最长排队秒数，0 = 立刻 503 |
+| `DEFAULT_MODEL` | `deepseek` | 请求未指定 model 时的默认值 |
+| `REPLY_TIMEOUT` | `180` | 上游回复超时（秒） |
+| `INJECT_REASONING_HINT` | `1` | 注入思考过程提示词（0 关闭） |
 
-### 踩坑清单（12 条，全带解法）
+## 模型
 
-1. **云端执行环境没有手机 shell** — 派给云端 subagent 的任务全部"跑不了"，
-   看起来像任务反复中断。**解法**：手机相关操作必须本地 `shell_execute` 自己跑。
-2. **装了 APK ≠ 服务在跑** — 你说"我已经安装了"，但前台服务起没起、端口听没听
-   仍是未知数。**解法**：装完必须跑 2.3 的四连验证，别跳步。
-3. **重复登录产生重复账号** — 同一手机号登 3 次就是 3 个独立 token，额度分开计、
-   看着像 4 个号。**解法**：按 `user_id` 去重，每个号只留一个 token。
-4. **`/v1/models` 短名长名重复** — 上游真实 ID 带 `model.` 前缀，本地注册表用短名，
-   两套都吐出来就 4 条。**解法**：对外只暴露短名；Minis 里也只加短名。
-5. **上游不返回 reasoning 字段** — 想要思考过程只能靠 prompt 注入逼模型写出来。
-   `INJECT_REASONING_HINT=1`（默认开）会在正文前插「分析：/结论：」格式要求。
-   **坑中坑**：标题生成这类客户端自动请求也会被注入、浪费 token ——
-   已按 `_HINT_SKIP_MARKERS`（"生成标题"/"title generation" 等）跳过。
-6. **Anthropic 协议要兼容两代** — `/v1/messages`（新）和 `/v1/complete`（旧）都开，
-   否则部分 Claude 客户端连不上。
-7. **SSE 流式** — `stream=true` 时按 OpenAI chunk 格式逐段推，别一次攒完再吐，
-   否则客户端看着像卡死。
-8. **额度百分比超过 98% 自动冷却** — `max_usage=98`，触发后该账号暂停轮询，
-   防止打死账号。冷却计数在 `/ui/pool` 可见。
-9. **AUTH_TOKENS 为空 = 不鉴权** — 只适合内网/本机。对外暴露必须设，
-   否则你的 pro 账号就是公共免费站。
-10. **session token 只存服务端** — 客户端只见 `AUTH_TOKENS`，上游 token 永不出
-    `/data/`。`install.sh --uninstall` 也会提醒这两处文件要手动删。
-11. **pro 账号也有模型限制** — `model` 字段记录该账号实际可用的模型
-    （两个号分别锁在 glm-5.3 / deepseek-v4.1-flash），轮询时按账号能力选。
-12. **免费额度判定别信 401/429 表面值** — Today 的 free/pro 行为跟 opencode.ai
-    不一样，free 号也是 200 但限速，pro 号才是真无限。升级 pro 后用
-    `usage_percent` 下降来确认生效。
+| 对外 model 值 | 说明 |
+|---|---|
+| `glm-5.3` | 智谱 GLM 5.3 |
+| `deepseek-v4.1-flash` / `deepseek` | DeepSeek v4.1 flash（默认） |
 
----
+## API
 
-## 4. 现在的状态
-
-- **手机端（本仓库主线）**：`127.0.0.1:8770` 在线，双 pro 账号池 healthy 2/2，
-  两模型推理实测 200。
-- **APK 版**（`Main8986/today-proxy-android`）：装在手机上作为备用通道，
-  同样监听 8770（与 Python 版互斥，别同时起）。
-- **Minis provider**：已注册为 OpenAI 类型，短名接入，可从任意模型组调用。
-- **未做**：对外公网暴露（无 nginx/域名层）、HTTPS、AUTH_TOKENS 仍为空 ——
-  当前是纯内网使用，要对外先补这三样。
-
----
-
-## 5. 文件清单
+### OpenAI 兼容
 
 ```
-.
-├── README.md               ← 本文
-├── server.py               主服务（25 KB，双协议 + 思考注入 + 控制台）
-├── core.py                 Today 私有协议封装（OTP 登录 / 推理请求 / 模型表）
-├── pool.py                 账号池（轮询 / 权重 / 冷却 / 并发闸）
-├── login.py                登录 CLI（send / verify，拿 session token）
-├── init.py                 数据目录初始化
-├── install.sh              一键部署（systemd）+ --uninstall
-├── today-proxy.service     systemd unit 模板
-├── Dockerfile / docker-compose.yml   Docker 部署（可选）
-├── scripts/
-│   └── verify.sh           部署后四连验证（进程/端口/模型/推理）
-└── evidence/
-    └── live-check.md       部署完成 7 小时后的活体复核记录
+POST /v1/chat/completions
+POST /v1/models
 ```
 
----
+### Anthropic 兼容
 
-*记录时间：2026-10-26 18:00 (Asia/Shanghai) · 手机沙箱内完成 · 双线部署（Python 主 + APK 备）*
+```
+POST /v1/messages     （x-api-key 或 Authorization 头均可）
+```
+
+### 管理端点
+
+```
+GET  /health          健康与号池概览
+GET  /ui/pool         号池明细（plan/usage/ok/err/cooldown）
+GET  /ui              Web 控制台
+```
+
+## 卸载
+
+```bash
+sudo bash install.sh --uninstall
+# 保留 /opt/today-proxy 与 /etc/today-proxy.env（含 session token）
+# 彻底删除：sudo rm -rf /opt/today-proxy /etc/today-proxy.env
+```
+
+## 安全提示
+
+- `AUTH_TOKENS` 为空时服务不鉴权，**不要暴露到公网**；生产环境务必设置 Key，
+  并用 nginx/caddy 反代加 HTTPS。
+- `data/session.txt` 与 `/etc/today-proxy.env` 含敏感 token，权限已是 600，
+  不要提交进 git（`.gitignore` 已挡）、不要截图分享。
+
+## License
+
+MIT

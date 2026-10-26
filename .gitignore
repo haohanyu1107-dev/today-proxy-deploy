@@ -1,8 +1,11 @@
-# 运行时数据（含 session token，绝不能进仓库）
+# 运行时数据（含 session token，绝不进仓库）
 data/
 *.json.bak
 session*.txt
 accounts.json
+
+# 运维记录（内部使用，不开源）
+evidence/
 
 # 系统垃圾
 __pycache__/
