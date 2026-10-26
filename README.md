@@ -111,8 +111,14 @@ curl http://127.0.0.1:8770/v1/chat/completions \
 ### OpenAI 兼容
 
 ```
-POST /v1/chat/completions
-POST /v1/models
+GET  /v1/chat/completions        # 405，仅确认路由存在
+POST /v1/chat/completions        # OpenAI 格式推理（含 SSE 流式）
+POST /v1/messages                # Anthropic 格式推理
+GET  /v1/models                  # 模型列表
+GET  /health                     # 健康检查 + 号池摘要
+GET  /ui                         # Web 控制台
+GET  /ui/pool                    # 号池状态 JSON
+POST /ui/pool/add | /remove | /refresh   # 号池管理（见 server.py 头部注释）
 ```
 
 ### Anthropic 兼容

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>today-proxy 控制台</title>
+<style>
+:root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e6e9ef;--dim:#8b93a3;--ok:#34c975;--bad:#ff5d5d;--acc:#4f8cff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:20px}
+h1{font-size:18px;margin:0 0 4px}.sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:7px 14px;font-size:13px;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button.danger{background:transparent;border:1px solid var(--bad);color:var(--bad)}
+input,select{background:#0c0e12;border:1px solid var(--line);border-radius:8px;color:var(--fg);padding:7px 10px;font-size:13px}
+input.token{flex:1;min-width:220px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--dim);text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:7px 8px;border-bottom:1px solid var(--line)}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.dim{color:var(--dim)}
+.bar{height:6px;background:#0c0e12;border-radius:4px;overflow:hidden;min-width:70px}
+.bar i{display:block;height:100%;background:var(--acc)}
+.bar i.hot{background:#f5a623}.bar i.crit{background:var(--bad)}
+#msg{font-size:12px;margin-top:8px;min-height:16px}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
+code{background:#0c0e12;padding:1px 6px;border-radius:5px;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>today-proxy 控制台</h1>
+  <div class="sub">GET /ui/pool · POST /ui/pool/add · /ui/pool/remove · /ui/pool/refresh</div>
+
+  <div class="card">
+    <div class="row">
+      <input class="token" id="tok" placeholder="Today session token（登录后抓包取 Authorization 值）" autocomplete="off">
+      <input id="label" placeholder="label（可选）" style="width:110px" autocomplete="off">
+      <button onclick="add()">添加账号</button>
+      <button class="ghost" onclick="refresh()">刷新额度</button>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>账号</th><th>plan</th><th>模型</th><th>额度</th><th>ok/err</th><th>状态</th><th></th></tr></thead>
+      <tbody id="pool"><tr><td colspan="7" class="dim">加载中…</td></tr></tbody>
+    </table>
+    <div class="sub" style="margin:8px 0 0">并发 <span id="conc">-</span> · 冷却阈值 <span id="mu">-</span>%</div>
+  </div>
+
+  <div class="card dim" style="font-size:12px">
+    模型切换：<select id="dmodel"></select>
+    <button class="ghost" style="margin-left:8px" onclick="setDefault()">设为默认</button>
+    <span style="margin-left:12px">服务端地址 <code id="base">/</code></span>
+  </div>
+</div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $ = id => document.getElementById(id);
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+  } : {});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || j.message || ('HTTP ' + r.status));
+  return j;
+}
+
+function bar(u) {
+  const cls = u >= 90 ? 'crit' : u >= 70 ? 'hot' : '';
+  return `<div class="bar"><i class="${cls}" style="width:${Math.min(u,100)}%"></i></div>`;
+}
+
+async function load() {
+  try {
+    const j = await api('/ui/pool');
+    $('conc').textContent = j.concurrency ?? '-';
+    $('mu').textContent = j.max_usage ?? '-';
+    $('base').textContent = location.origin;
+    if (!j.accounts?.length) { $('pool').innerHTML = '<tr><td colspan="7" class="dim">号池为空，先添加 token</td></tr>'; return; }
+    $('pool').innerHTML = j.accounts.map(a => `
+      <tr>
+        <td><code>${esc(a.label)}</code></td>
+        <td>${esc(a.plan)}</td>
+        <td><code>${esc(a.model || '-')}</code></td>
+        <td>${a.usage_percent ?? '-'}% ${bar(a.usage_percent || 0)}</td>
+        <td>${a.ok ?? 0} / <span class="${a.err ? 'bad' : 'dim'}">${a.err ?? 0}</span></td>
+        <td>${a.healthy ? '<span class="ok">健康</span>' : `<span class="bad">冷却 ${a.cooldown ?? 0}s</span>`}${a.last_error ? `<div class="dim" style="font-size:11px">${esc(a.last_error)}</div>` : ''}</td>
+        <td><button class="danger" onclick="del('${esc(a.label)}')">移除</button></td>
+      </tr>`).join('');
+  } catch (e) {
+    $('pool').innerHTML = `<tr><td colspan="7" class="bad">${esc(e.message)}</td></tr>`;
+  }
+}
+
+async function add() {
+  const token = $('tok').value.trim();
+  if (!token) { note('token 不能为空', true); return; }
+  try {
+    const j = await api('/ui/pool/add', { token, weight: 1, label: $('label').value.trim() });
+    note(`已添加（号池 ${j.accounts} 个），后台健康检查中`, false);
+    $('tok').value = ''; $('label').value = '';
+    setTimeout(load, 1500);
+  } catch (e) { note(e.message, true); }
+}
+
+async function del(label) {
+  if (!confirm(`移除 ${label}？`)) return;
+  try { const j = await api('/ui/pool/remove', { key: label }); note(`已移除 ${j.removed} 个`, false); load(); }
+  catch (e) { note(e.message, true); }
+}
+
+async function refresh() {
+  note('刷新中…', false);
+  try { await api('/ui/pool/refresh', {}); note('已强制刷新额度', false); load(); }
+  catch (e) { note(e.message, true); }
+}
+
+async function setDefault() {
+  note('默认模型仅存于运行时，重启后回落 config.json 的 default_model', false);
+}
+
+function note(t, bad) { $('msg').innerHTML = `<span class="${bad ? 'bad' : 'dim'}">${esc(t)}</span>`; }
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
